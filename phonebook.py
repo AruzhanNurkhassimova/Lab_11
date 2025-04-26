@@ -6,6 +6,7 @@ conn = psycopg2.connect(host="localhost", user = "postgres", password = "Malkuth
 
 cur = conn.cursor()
 
+# выполняет sql-запрос к базе данных (execute)
 cur.execute("""CREATE TABLE IF NOT EXISTS phonebook (
       user_id SERIAL PRIMARY KEY,
       name VARCHAR(255) NOT NULL,
@@ -18,13 +19,23 @@ cur.execute("""CREATE TABLE IF NOT EXISTS phonebook (
 
 cur.execute("""
 CREATE OR REPLACE FUNCTION search_by_pattern(pattern TEXT)
-RETURNS TABLE (user_id INT, name TEXT, surname TEXT, phone TEXT) AS $$
+RETURNS TABLE (
+    user_id INT,
+    name TEXT,
+    surname TEXT,
+    phone TEXT
+) AS $$
 BEGIN
     RETURN QUERY
-    SELECT * FROM phonebook
-    WHERE name ILIKE '%' || pattern || '%'
-       OR surname ILIKE '%' || pattern || '%'
-       OR phone ILIKE '%' || pattern || '%';
+    SELECT 
+        p.user_id,
+        p.name::TEXT,
+        p.surname::TEXT,
+        p.phone::TEXT
+    FROM phonebook p
+    WHERE p.name ILIKE '%' || pattern || '%'
+       OR p.surname ILIKE '%' || pattern || '%'
+       OR p.phone ILIKE '%' || pattern || '%';
 END;
 $$ LANGUAGE plpgsql;
 """)
@@ -44,25 +55,26 @@ $$;
 """)
 
 cur.execute("""
+DROP PROCEDURE IF EXISTS insert_many_users(TEXT[], TEXT[], TEXT[]);
+
 CREATE OR REPLACE PROCEDURE insert_many_users(
-    names TEXT[], surnames TEXT[], phones TEXT[], OUT invalid_rows TEXT[]
+    in_names TEXT[],
+    in_surnames TEXT[],
+    in_phones TEXT[]
 )
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    i INT;
+    i INT := 1;
 BEGIN
-    invalid_rows := ARRAY[]::TEXT[];
-    FOR i IN 1..array_length(names, 1) LOOP
-        IF phones[i] ~ '^\d{10,}$' THEN
-            IF EXISTS (SELECT 1 FROM phonebook WHERE name = names[i] AND surname = surnames[i]) THEN
-                UPDATE phonebook SET phone = phones[i] WHERE name = names[i] AND surname = surnames[i];
-            ELSE
-                INSERT INTO phonebook (name, surname, phone) VALUES (names[i], surnames[i], phones[i]);
-            END IF;
+    WHILE i <= array_length(in_names, 1) LOOP
+        IF in_phones[i] ~ '^[0-9]{11}$' THEN
+            INSERT INTO phonebook(name, surname, phone)
+            VALUES (in_names[i], in_surnames[i], in_phones[i]);
         ELSE
-            invalid_rows := array_append(invalid_rows, names[i] || ' ' || surnames[i] || ' -> ' || phones[i]);
+            RAISE NOTICE 'Invalid phone: %, Name: %, Surname: %', in_phones[i], in_names[i], in_surnames[i];
         END IF;
+        i := i + 1;
     END LOOP;
 END;
 $$;
@@ -73,7 +85,14 @@ CREATE OR REPLACE FUNCTION get_users_with_pagination(p_limit INT, p_offset INT)
 RETURNS TABLE(user_id INT, name TEXT, surname TEXT, phone TEXT) AS $$
 BEGIN
     RETURN QUERY
-    SELECT * FROM phonebook ORDER BY user_id LIMIT p_limit OFFSET p_offset;
+    SELECT 
+        p.user_id,
+        p.name::TEXT,
+        p.surname::TEXT,
+        p.phone::TEXT
+    FROM phonebook p
+    ORDER BY p.user_id
+    LIMIT p_limit OFFSET p_offset;
 END;
 $$ LANGUAGE plpgsql;
 """)
@@ -138,6 +157,7 @@ def search_by_pattern():
     cur.execute("SELECT * FROM search_by_pattern(%s);", (pattern,))
     rows = cur.fetchall()
     print(tabulate(rows, headers=["ID", "Name", "Surname", "Phone"], tablefmt='fancy_grid'))
+    conn.commit()
 
 def insert_or_update_user():
     name = input("Name: ")
@@ -149,23 +169,22 @@ def insert_or_update_user():
 def insert_many_users():
     filepath = input("Enter CSV path: ")
     names, surnames, phones = [], [], []
-    with open(filepath, 'r') as f:
-        reader = csv.reader(f)
-        next(reader)
-        for row in reader:
-            names.append(row[0])
-            surnames.append(row[1])
-            phones.append(row[2])
-    cur.execute("CALL insert_many_users(%s, %s, %s);", (names, surnames, phones))
-    cur.execute("SELECT * FROM unnest(%s);", (cur.fetchone()[0],))
-    invalid = cur.fetchall()
-    if invalid:
-        print("Invalid rows:")
-        for row in invalid:
-            print(row[0])
-    else:
-        print("All rows inserted successfully.")
-    conn.commit()
+    try:
+        with open(filepath, 'r') as f:
+            reader = csv.reader(f)
+            next(reader)
+            for row in reader:
+                names.append(row[0])
+                surnames.append(row[1])
+                phones.append(row[2])
+
+        cur.execute("CALL insert_many_users(%s, %s, %s);", (names, surnames, phones))
+        conn.commit()
+        print("Bulk insert operation completed.")
+    except FileNotFoundError:
+        print("File not found. Please check the path.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
 def get_paginated_users():
     limit = int(input("Limit: "))
